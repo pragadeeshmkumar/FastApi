@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from enum import Enum as PyEnum
 from pydantic import BaseModel, Field, EmailStr
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.sql.sqltypes import TIMESTAMP
+from sqlalchemy.sql.expression import text
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from fastapi import FastAPI,HTTPException, status
 from fastapi.params import Depends
@@ -44,7 +46,7 @@ class Post(Base):
     title = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     author_id = Column(Integer, ForeignKey("pragadeesh_users.id"))
-    created_at = Column(DateTime, default=datetime)
+    created_at = Column(TIMESTAMP(timezone=True),nullable=False,server_default=text('now()'))
     author = relationship("User")
 
 class Comment(Base):
@@ -54,7 +56,7 @@ class Comment(Base):
     content = Column(Text, nullable=False)
     post_id = Column(Integer, ForeignKey("pragadeesh_posts.id"))
     user_id = Column(Integer, ForeignKey("pragadeesh_users.id"))
-    created_at = Column(DateTime, default=datetime)
+    created_at = Column(TIMESTAMP(timezone=True),nullable=False,server_default=text('now()'))
     user = relationship("User")
     post = relationship("Post")
 
@@ -84,7 +86,7 @@ class Token(BaseModel):
     token_type: str
 
 class TokenData(BaseModel):
-    username: Optional[str]=None
+    id: Optional[int]=None
 
 class PostCreate(BaseModel):
     title: str
@@ -92,7 +94,7 @@ class PostCreate(BaseModel):
 
 def generate_token(data:dict):
     to_encode=data.copy()
-    expire = datetime.utcnow()+timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now()+timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({'exp':expire})
     encoded_jwt=jwt.encode(to_encode,SECRET_KEY,algorithm=ALGORITHM)
     return encoded_jwt
@@ -105,15 +107,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        id: str = payload.get("user_id")
+        if id is None:
             raise credentials_exception
-        user = db.query(UserCreate).filter(UserCreate.username == username).first()
+        token_data=TokenData(id=id)
+        user = db.query(User).filter(User.id == token_data.id).first()
         if user is None:
             raise credentials_exception
-        return user
     except JWTError:
         raise credentials_exception
+    return user
 
 @app.post("/api/register", response_model=UserCreate)
 def register(request: UserCreate, db: Session = Depends(get_db)):
@@ -131,15 +134,15 @@ def login(request: OAuth2PasswordRequestForm=Depends(), db: Session = Depends(ge
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     if not pwd_context.verify(request.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    access_token=generate_token(data={'sub':user.username})
+    access_token=generate_token(data={'user_id':user.id})
     return {'access_token':access_token,'token_type':'bearer'}
 
-@app.post("/api/posts",response_model=PostCreate)
-def create_post(request: PostCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.username == current_user).first()
+@app.post("/api/posts")
+def create_post(request: PostCreate, db: Session = Depends(get_db), current_user: int = Depends(get_current_user)):
+    db_user = db.query(User).filter(User.id == current_user.id).first()
     if db_user.role not in [UserRole.admin, UserRole.author]:
         raise HTTPException(status_code=403)
-    new_post = Post(title=request.title, content=request.content, author_id=current_user.id )
+    new_post = Post(title=request.title, content=request.content, author_id=current_user.id,created_at=datetime.now())
     db.add(new_post)
     db.commit()
     db.refresh(new_post)
@@ -154,12 +157,11 @@ def get_posts(author: Optional[str] = None, page: int = 1, db: Session = Depends
     return posts
 
 @app.post("/api/posts/{post_id}/comments")
-def add_comment(post_id: int, comment: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    #db_user = db.query(User).filter(User.username == current_user).first()
+def add_comment(post_id: int, comment: str, db: Session = Depends(get_db), current_user: int = Depends(get_current_user)):
     db_post = db.query(Post).filter(Post.id == post_id).first()
     if not db_post:
         raise HTTPException(status_code=404)
-    new_comment = Comment(content=comment, post_id=post_id, user_id=current_user.id)
+    new_comment = Comment(content=comment, post_id=post_id, user_id=current_user.id,created_at=datetime.now())
     db.add(new_comment)
     db.commit()
     db.refresh(new_comment)
